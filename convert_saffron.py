@@ -1,150 +1,163 @@
-"""
-==========================================================
-Saffron COCO Dataset Splitter
-----------------------------------------------------------
-Splits one COCO annotation file into
-train.json / val.json / test.json
-
-Author : Shamayita Moitra
-==========================================================
-"""
-
 import json
 import random
-from pathlib import Path
+import math
+from copy import deepcopy
 
-# ==========================================================
-# Configuration
-# ==========================================================
+random.seed(42)
 
-SEED = 42
+DATASET = "saffron/annotations/result.json"
 
-TRAIN_RATIO = 0.75
-VAL_RATIO = 0.125
-TEST_RATIO = 0.125
-
-ROOT = Path("saffron")
-ANNOTATION_FILE = ROOT / "annotations" / "result.json"
-OUTPUT_DIR = ROOT / "annotations"
-
-random.seed(SEED)
-
-# ==========================================================
-# Load COCO
-# ==========================================================
-
-with open(ANNOTATION_FILE, "r") as f:
+with open(DATASET, "r") as f:
     coco = json.load(f)
 
 images = coco["images"]
 annotations = coco["annotations"]
 categories = coco["categories"]
-info = coco.get("info", {})
 
-# ==========================================================
-# Keep only images that actually have annotations
-# ==========================================================
+# ---------------------------------------------------
+# Remove images without annotations
+# ---------------------------------------------------
 
-annotated_image_ids = {ann["image_id"] for ann in annotations}
+annotated_ids = {a["image_id"] for a in annotations}
+images = [img for img in images if img["id"] in annotated_ids]
 
-images = [
-    img for img in images
-    if img["id"] in annotated_image_ids
-]
+print(f"Images      : {len(images)}")
+print(f"Annotations : {len(annotations)}")
 
-print(f"Images       : {len(images)}")
-print(f"Annotations  : {len(annotations)}")
+# ---------------------------------------------------
+# Merge flower bbox + nearest cutting point
+# ---------------------------------------------------
 
-# ==========================================================
+new_annotations = []
+new_id = 1
+
+for img in images:
+
+    img_id = img["id"]
+
+    anns = [a for a in annotations if a["image_id"] == img_id]
+
+    flowers = [a for a in anns if a["category_id"] == 0]
+    points = [a for a in anns if a["category_id"] == 1]
+
+    used_points = set()
+
+    for flower in flowers:
+
+        if "bbox" not in flower:
+            continue
+
+        bx, by, bw, bh = flower["bbox"]
+
+        cx = bx + bw / 2
+        cy = by + bh / 2
+
+        best = None
+        best_dist = 1e18
+
+        for i, pt in enumerate(points):
+
+            if i in used_points:
+                continue
+
+            if "keypoints" not in pt:
+                continue
+
+            kp = pt["keypoints"]
+
+            x = kp[0]
+            y = kp[1]
+
+            d = math.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+
+            if d < best_dist:
+                best_dist = d
+                best = (i, pt)
+
+        if best is None:
+            continue
+
+        idx, pt = best
+        used_points.add(idx)
+
+        kp = pt["keypoints"]
+
+        ann = {
+            "id": new_id,
+            "image_id": img_id,
+            "category_id": 1,
+            "bbox": flower["bbox"],
+            "area": flower.get("area", bw * bh),
+            "iscrowd": 0,
+            "num_keypoints": 1,
+            "keypoints": kp
+        }
+
+        new_annotations.append(ann)
+        new_id += 1
+
+print("Merged annotations :", len(new_annotations))
+
+# ---------------------------------------------------
 # Shuffle images
-# ==========================================================
+# ---------------------------------------------------
 
 random.shuffle(images)
 
 n = len(images)
 
-train_end = int(n * TRAIN_RATIO)
-val_end = train_end + int(n * VAL_RATIO)
+train_imgs = images[: int(0.75 * n)]
+val_imgs = images[int(0.75 * n): int(0.875 * n)]
+test_imgs = images[int(0.875 * n):]
 
-train_images = images[:train_end]
-val_images = images[train_end:val_end]
-test_images = images[val_end:]
+train_ids = {i["id"] for i in train_imgs}
+val_ids = {i["id"] for i in val_imgs}
+test_ids = {i["id"] for i in test_imgs}
 
-# ==========================================================
-# Image ID sets
-# ==========================================================
+train_ann = [a for a in new_annotations if a["image_id"] in train_ids]
+val_ann = [a for a in new_annotations if a["image_id"] in val_ids]
+test_ann = [a for a in new_annotations if a["image_id"] in test_ids]
 
-train_ids = {img["id"] for img in train_images}
-val_ids = {img["id"] for img in val_images}
-test_ids = {img["id"] for img in test_images}
+# ---------------------------------------------------
+# Categories for RTMPose
+# ---------------------------------------------------
 
-# ==========================================================
-# Split annotations
-# ==========================================================
+rtm_categories = [{
+    "id": 1,
+    "name": "flower",
+    "supercategory": "flower",
+    "keypoints": ["cut_point"],
+    "skeleton": []
+}]
 
-train_annotations = [
-    ann for ann in annotations
-    if ann["image_id"] in train_ids
-]
+# ---------------------------------------------------
+# Save
+# ---------------------------------------------------
 
-val_annotations = [
-    ann for ann in annotations
-    if ann["image_id"] in val_ids
-]
+def save(path, imgs, anns):
 
-test_annotations = [
-    ann for ann in annotations
-    if ann["image_id"] in test_ids
-]
-
-# ==========================================================
-# Save helper
-# ==========================================================
-
-def save_json(filename, imgs, anns):
-
-    output = {
-        "info": info,
+    out = {
         "images": imgs,
         "annotations": anns,
-        "categories": categories
+        "categories": deepcopy(rtm_categories)
     }
 
-    with open(OUTPUT_DIR / filename, "w") as f:
-        json.dump(output, f, indent=4)
+    with open(path, "w") as f:
+        json.dump(out, f)
 
-# ==========================================================
-# Save
-# ==========================================================
+save("saffron/annotations/train.json", train_imgs, train_ann)
+save("saffron/annotations/val.json", val_imgs, val_ann)
+save("saffron/annotations/test.json", test_imgs, test_ann)
 
-save_json("train.json", train_images, train_annotations)
-save_json("val.json", val_images, val_annotations)
-save_json("test.json", test_images, test_annotations)
+print("\n==============================")
+print("RTMPOSE DATASET CREATED")
+print("==============================")
 
-# ==========================================================
-# Summary
-# ==========================================================
+print("Train :", len(train_imgs), len(train_ann))
+print("Val   :", len(val_imgs), len(val_ann))
+print("Test  :", len(test_imgs), len(test_ann))
 
-print("\n==========================================")
-print("SAFFRON COCO SPLIT COMPLETED")
-print("==========================================")
-
-print(f"Train Images      : {len(train_images)}")
-print(f"Validation Images : {len(val_images)}")
-print(f"Test Images       : {len(test_images)}")
-
-print()
-
-print(f"Train Annotations : {len(train_annotations)}")
-print(f"Validation Annots : {len(val_annotations)}")
-print(f"Test Annotations  : {len(test_annotations)}")
-
-print()
-
-print("Saved:")
-
-print(OUTPUT_DIR / "train.json")
-print(OUTPUT_DIR / "val.json")
-print(OUTPUT_DIR / "test.json")
-
-print("==========================================")
+print("\nSaved:")
+print("saffron/annotations/train.json")
+print("saffron/annotations/val.json")
+print("saffron/annotations/test.json")
