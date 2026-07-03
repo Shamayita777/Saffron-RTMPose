@@ -114,15 +114,15 @@ train_pipeline = [
     dict(type='LoadImage', backend_args=backend_args),
     dict(type='GetBBoxCenterScale'),
     dict(type='RandomFlip', direction='horizontal'),
-    dict(type='RandomHalfBody'),
+    #dict(type='RandomHalfBody'),
     dict(
-        type='RandomBBoxTransform', scale_factor=[0.6, 1.4], rotate_factor=80),
+        type='RandomBBoxTransform', scale_factor=[0.6, 1.4], rotate_factor=20),
     dict(type='TopdownAffine', input_size=codec['input_size']),
     dict(type='mmdet.YOLOXHSVRandomAug'),
     dict(
         type='Albumentation',
         transforms=[
-            dict(type='Blur', p=0.1),
+            #dict(type='Blur', p=0.1),
             dict(type='MedianBlur', p=0.1),
             dict(
                 type='CoarseDropout',
@@ -132,7 +132,7 @@ train_pipeline = [
                 min_holes=1,
                 min_height=0.2,
                 min_width=0.2,
-                p=1.),
+                p=0.2),
         ]),
     dict(type='GenerateTarget', encoder=codec),
     dict(type='PackPoseInputs')
@@ -148,7 +148,7 @@ train_pipeline_stage2 = [
     dict(type='LoadImage', backend_args=backend_args),
     dict(type='GetBBoxCenterScale'),
     dict(type='RandomFlip', direction='horizontal'),
-    dict(type='RandomHalfBody'),
+    #dict(type='RandomHalfBody'),
     dict(
         type='RandomBBoxTransform',
         shift_factor=0.,
@@ -189,7 +189,7 @@ train_dataloader = dict(
             from_file='configs/_base_/datasets/saffron.py'
         ),
         ann_file='annotations/train.json',
-        data_prefix=dict(img='images/'),
+        data_prefix=dict(img='images/train/'),
         pipeline=train_pipeline,
     ))
 val_dataloader = dict(
@@ -207,11 +207,28 @@ val_dataloader = dict(
         ),
 
         ann_file='annotations/val.json',
-        data_prefix=dict(img='images/'),
+        data_prefix=dict(img='images/val/'),
         test_mode=True,
         pipeline=val_pipeline,
     ))
-test_dataloader = val_dataloader
+test_dataloader = dict(
+    batch_size=8,
+    num_workers=4,
+    persistent_workers=False,
+    drop_last=False,
+    sampler=dict(type='DefaultSampler', shuffle=False, round_up=False),
+    dataset=dict(
+        type=dataset_type,
+        data_root=data_root,
+        data_mode=data_mode,
+        metainfo=dict(
+            from_file='configs/_base_/datasets/saffron.py'
+        ),
+        ann_file='annotations/test.json',
+        data_prefix=dict(img='images/test/'),
+        test_mode=True,
+        pipeline=val_pipeline,
+    ))
 
 # hooks
 default_hooks = dict(
@@ -234,4 +251,6 @@ custom_hooks = [
 val_evaluator = dict(
     type='CocoMetric',
     ann_file=data_root + 'annotations/val.json')
-test_evaluator = val_evaluator
+test_evaluator = dict(
+    type='CocoMetric',
+    ann_file=data_root + 'annotations/test.json')

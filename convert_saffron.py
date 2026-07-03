@@ -1,128 +1,135 @@
 import json
 import random
-import math
 from copy import deepcopy
 
 random.seed(42)
 
-DATASET = "saffron/annotations/result.json"
+INPUT = "project.json"
 
-with open(DATASET, "r") as f:
-    coco = json.load(f)
+with open(INPUT, "r") as f:
+    tasks = json.load(f)
 
-images = coco["images"]
-annotations = coco["annotations"]
-categories = coco["categories"]
+images = []
+annotations = []
+ann_id = 1
+empty_images = 0
+warnings = 0
 
-# ---------------------------------------------------
-# Remove images without annotations
-# ---------------------------------------------------
+for task in tasks:
 
-annotated_ids = {a["image_id"] for a in annotations}
-images = [img for img in images if img["id"] in annotated_ids]
+    img_id = task["inner_id"]
+    filename = task["file_upload"]
 
-print(f"Images      : {len(images)}")
-print(f"Annotations : {len(annotations)}")
+    if len(task["annotations"]) == 0:
+        empty_images += 1
 
-# ---------------------------------------------------
-# Merge flower bbox + nearest cutting point
-# ---------------------------------------------------
+        images.append({
+            "id": img_id,
+            "width": 1280,
+            "height": 720,
+            "file_name": filename
+        })
+        continue
 
-new_annotations = []
-new_id = 1
+    results = task["annotations"][0]["result"]
 
-for img in images:
+    if len(results) == 0:
+        empty_images += 1
+        continue
 
-    img_id = img["id"]
+    width = 1280
+    height = 720
 
-    anns = [a for a in annotations if a["image_id"] == img_id]
+    images.append({
+        "id": img_id,
+        "width": width,
+        "height": height,
+        "file_name": filename
+    })
 
-    flowers = [a for a in anns if a["category_id"] == 0]
-    points = [a for a in anns if a["category_id"] == 1]
+    rectangles = []
+    keypoints = []
 
-    used_points = set()
+    for r in results:
+        if r["type"] == "rectanglelabels":
+            rectangles.append(r)
 
-    for flower in flowers:
+        elif r["type"] == "keypointlabels":
+            keypoints.append(r)
 
-        if "bbox" not in flower:
+    used = set()
+
+    for box in rectangles:
+
+        matched = None
+
+        # First try matching using parentID (future-proof)
+        if "id" in box:
+            for idx, kp in enumerate(keypoints):
+                if idx in used:
+                    continue
+
+                if kp.get("parentID") == box["id"]:
+                    matched = (idx, kp)
+                    break
+
+        # Fall back to nearest unused keypoint in order
+        if matched is None:
+            for idx, kp in enumerate(keypoints):
+                if idx not in used:
+                    matched = (idx, kp)
+                    break
+
+        if matched is None:
             continue
 
-        bx, by, bw, bh = flower["bbox"]
+        idx, kp = matched
+        used.add(idx)
 
-        cx = bx + bw / 2
-        cy = by + bh / 2
+        bx = box["value"]["x"] * width / 100
+        by = box["value"]["y"] * height / 100
+        bw = box["value"]["width"] * width / 100
+        bh = box["value"]["height"] * height / 100
 
-        best = None
-        best_dist = 1e18
+        kx = kp["value"]["x"] * width / 100
+        ky = kp["value"]["y"] * height / 100
 
-        for i, pt in enumerate(points):
+        if not (bx <= kx <= bx + bw and by <= ky <= by + bh):
+            warnings += 1
+            print(
+                f"Warning: keypoint outside bbox in image {filename}"
+            )
 
-            if i in used_points:
-                continue
-
-            if "keypoints" not in pt:
-                continue
-
-            kp = pt["keypoints"]
-
-            x = kp[0]
-            y = kp[1]
-
-            d = math.sqrt((x - cx) ** 2 + (y - cy) ** 2)
-
-            if d < best_dist:
-                best_dist = d
-                best = (i, pt)
-
-        if best is None:
-            continue
-
-        idx, pt = best
-        used_points.add(idx)
-
-        kp = pt["keypoints"]
-
-        ann = {
-            "id": new_id,
+        annotations.append({
+            "id": ann_id,
             "image_id": img_id,
             "category_id": 1,
-            "bbox": flower["bbox"],
-            "area": flower.get("area", bw * bh),
+            "bbox": [bx, by, bw, bh],
+            "area": bw * bh,
             "iscrowd": 0,
             "num_keypoints": 1,
-            "keypoints": kp
-        }
+            "keypoints": [kx, ky, 2]
+        })
 
-        new_annotations.append(ann)
-        new_id += 1
-
-print("Merged annotations :", len(new_annotations))
-
-# ---------------------------------------------------
-# Shuffle images
-# ---------------------------------------------------
+        ann_id += 1
 
 random.shuffle(images)
 
 n = len(images)
 
-train_imgs = images[: int(0.75 * n)]
-val_imgs = images[int(0.75 * n): int(0.875 * n)]
-test_imgs = images[int(0.875 * n):]
+train = images[:int(0.75 * n)]
+val = images[int(0.75 * n):int(0.875 * n)]
+test = images[int(0.875 * n):]
 
-train_ids = {i["id"] for i in train_imgs}
-val_ids = {i["id"] for i in val_imgs}
-test_ids = {i["id"] for i in test_imgs}
+train_ids = {x["id"] for x in train}
+val_ids = {x["id"] for x in val}
+test_ids = {x["id"] for x in test}
 
-train_ann = [a for a in new_annotations if a["image_id"] in train_ids]
-val_ann = [a for a in new_annotations if a["image_id"] in val_ids]
-test_ann = [a for a in new_annotations if a["image_id"] in test_ids]
+train_ann = [a for a in annotations if a["image_id"] in train_ids]
+val_ann = [a for a in annotations if a["image_id"] in val_ids]
+test_ann = [a for a in annotations if a["image_id"] in test_ids]
 
-# ---------------------------------------------------
-# Categories for RTMPose
-# ---------------------------------------------------
-
-rtm_categories = [{
+cats = [{
     "id": 1,
     "name": "flower",
     "supercategory": "flower",
@@ -130,34 +137,28 @@ rtm_categories = [{
     "skeleton": []
 }]
 
-# ---------------------------------------------------
-# Save
-# ---------------------------------------------------
 
-def save(path, imgs, anns):
+def save(name, imgs, anns):
 
-    out = {
-        "images": imgs,
-        "annotations": anns,
-        "categories": deepcopy(rtm_categories)
-    }
+    with open(name, "w") as f:
+        json.dump({
+            "images": imgs,
+            "annotations": anns,
+            "categories": deepcopy(cats)
+        }, f, indent=2)
 
-    with open(path, "w") as f:
-        json.dump(out, f)
 
-save("saffron/annotations/train.json", train_imgs, train_ann)
-save("saffron/annotations/val.json", val_imgs, val_ann)
-save("saffron/annotations/test.json", test_imgs, test_ann)
+save("train.json", train, train_ann)
+save("val.json", val, val_ann)
+save("test.json", test, test_ann)
 
-print("\n==============================")
-print("RTMPOSE DATASET CREATED")
-print("==============================")
-
-print("Train :", len(train_imgs), len(train_ann))
-print("Val   :", len(val_imgs), len(val_ann))
-print("Test  :", len(test_imgs), len(test_ann))
-
-print("\nSaved:")
-print("saffron/annotations/train.json")
-print("saffron/annotations/val.json")
-print("saffron/annotations/test.json")
+print("\n========== Dataset Summary ==========")
+print(f"Images           : {len(images)}")
+print(f"Annotations      : {len(annotations)}")
+print(f"Empty images     : {empty_images}")
+print(f"Warnings         : {warnings}")
+print("-------------------------------------")
+print(f"Train : {len(train)} images | {len(train_ann)} annotations")
+print(f"Val   : {len(val)} images | {len(val_ann)} annotations")
+print(f"Test  : {len(test)} images | {len(test_ann)} annotations")
+print("=====================================")
